@@ -37,7 +37,6 @@ class Inc42CompanyTableScraper:
         chrome_options.add_argument('--disable-features=VizDisplayCompositor')
         chrome_options.add_argument('--disable-extensions')
         chrome_options.add_argument('--disable-plugins')
-        chrome_options.add_argument('--disable-images')  # Faster loading
         
         # User agent to appear as a real browser
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
@@ -50,40 +49,25 @@ class Inc42CompanyTableScraper:
             logger.error(f"Failed to initialize WebDriver: {e}")
             raise
     
-    def wait_for_table_to_load(self, timeout=20):
+    def wait_for_table_to_load(self, timeout=30):
         """Wait for the company table to fully load."""
         try:
-            # Wait for the main container
+            logger.info("Waiting for page to load...")
+            
+            # Wait for the table to appear
             WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "MuiContainer-root"))
+                EC.presence_of_element_located((By.TAG_NAME, "table"))
             )
+            logger.info("Table element found")
             
-            # Wait for table content - try multiple possible selectors
-            table_selectors = [
-                "table",
-                "[class*='tableStyle__TableSectionLayout']",
-                "[class*='MuiPaper-root']",
-                ".MuiTableContainer-root",
-                "[class*='Table']"
-            ]
+            # Wait for table rows to load
+            WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "table tbody tr"))
+            )
+            logger.info("Table rows found")
             
-            table_found = False
-            for selector in table_selectors:
-                try:
-                    WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    logger.info(f"Table found using selector: {selector}")
-                    table_found = True
-                    break
-                except TimeoutException:
-                    continue
-            
-            if not table_found:
-                logger.warning("No table found with standard selectors, trying alternative approach")
-            
-            # Additional wait for dynamic content
-            time.sleep(3)
+            # Additional wait for dynamic content to fully render
+            time.sleep(5)
             return True
             
         except TimeoutException:
@@ -93,86 +77,134 @@ class Inc42CompanyTableScraper:
     def scroll_and_load_more(self):
         """Scroll down to load more companies if pagination exists."""
         try:
-            # Get initial height
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
+            logger.info("Starting to scroll to load more companies...")
+            
+            # Get initial number of rows
+            initial_rows = len(self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr"))
+            logger.info(f"Initial rows found: {initial_rows}")
             
             # Scroll down multiple times to load more content
-            for i in range(5):  # Try scrolling 5 times
+            for i in range(10):  # Scroll 10 times
                 # Scroll to bottom
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                logger.info(f"Scroll {i+1}/10 completed")
                 
                 # Wait for new content to load
-                time.sleep(2)
+                time.sleep(3)
                 
-                # Calculate new height
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
-                
-                if new_height == last_height:
-                    # No more content loaded
+                # Check if new rows were added
+                current_rows = len(self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr"))
+                if current_rows > initial_rows:
+                    logger.info(f"New rows loaded: {current_rows} (was {initial_rows})")
+                    initial_rows = current_rows
+                else:
+                    # No new content loaded, break early
+                    logger.info("No new content loaded, stopping scroll")
                     break
-                    
-                last_height = new_height
-                logger.info(f"Scrolled {i+1} times, new height: {new_height}")
             
             # Scroll back to top
             self.driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(1)
+            time.sleep(2)
+            
+            final_rows = len(self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr"))
+            logger.info(f"Final number of rows after scrolling: {final_rows}")
             
         except Exception as e:
             logger.error(f"Error during scrolling: {e}")
     
+    def extract_table_headers(self):
+        """Extract table headers."""
+        try:
+            # Try to find header row
+            header_row = self.driver.find_element(By.CSS_SELECTOR, "table thead tr")
+            header_cells = header_row.find_elements(By.TAG_NAME, "th")
+            
+            headers = []
+            for cell in header_cells:
+                header_text = cell.get_attribute('textContent').strip()
+                if header_text:  # Skip empty headers (like checkbox column)
+                    headers.append(header_text)
+                else:
+                    headers.append(f"Column_{len(headers)+1}")
+            
+            logger.info(f"Extracted headers: {headers}")
+            return headers
+            
+        except NoSuchElementException:
+            # Fallback headers based on your screenshot
+            default_headers = ['Checkbox', 'Company', 'Sector', 'Founded_Date', 'Amount_Raised', 'Headquarters', 'Founders']
+            logger.info(f"Using default headers: {default_headers}")
+            return default_headers
+    
     def extract_table_data(self):
         """Extract company data from the loaded table."""
         try:
-            # Try multiple approaches to find table rows
-            table_rows = []
+            # Find the table and all data rows
+            table = self.driver.find_element(By.TAG_NAME, "table")
+            tbody = table.find_element(By.TAG_NAME, "tbody")
+            rows = tbody.find_elements(By.TAG_NAME, "tr")
             
-            # Approach 1: Standard table structure
-            try:
-                table = self.driver.find_element(By.TAG_NAME, "table")
-                table_rows = table.find_elements(By.TAG_NAME, "tr")
-                logger.info(f"Found {len(table_rows)} rows using standard table approach")
-            except NoSuchElementException:
-                pass
+            logger.info(f"Found {len(rows)} data rows in table")
             
-            # Approach 2: Material-UI table structure
-            if not table_rows:
-                try:
-                    table_body = self.driver.find_element(By.CSS_SELECTOR, "tbody, .MuiTableBody-root")
-                    table_rows = table_body.find_elements(By.CSS_SELECTOR, "tr, .MuiTableRow-root")
-                    logger.info(f"Found {len(table_rows)} rows using MUI table approach")
-                except NoSuchElementException:
-                    pass
-            
-            # Approach 3: Generic row detection
-            if not table_rows:
-                try:
-                    table_rows = self.driver.find_elements(By.CSS_SELECTOR, "[class*='row'], [class*='Row']")
-                    # Filter for actual data rows
-                    table_rows = [row for row in table_rows if len(row.find_elements(By.TAG_NAME, "td")) > 3]
-                    logger.info(f"Found {len(table_rows)} rows using generic approach")
-                except NoSuchElementException:
-                    pass
-            
-            if not table_rows:
+            if not rows:
                 logger.error("No table rows found")
                 return []
             
-            # Extract header information
-            headers = self.extract_headers()
+            # Extract headers
+            headers = self.extract_table_headers()
             
             # Extract data from each row
             extracted_data = []
-            for i, row in enumerate(table_rows):
+            
+            for i, row in enumerate(rows):
                 try:
-                    # Skip header row if it's included
-                    if i == 0 and self.is_header_row(row):
+                    # Find all cells in the row
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    
+                    if len(cells) < 3:  # Skip rows with too few cells
                         continue
                     
-                    row_data = self.extract_row_data(row, headers)
-                    if row_data and any(row_data.values()):  # Only add if row has actual data
+                    row_data = {}
+                    
+                    # Extract data from each cell
+                    for j, cell in enumerate(cells):
+                        try:
+                            # Get cell text content
+                            cell_text = cell.get_attribute('textContent').strip()
+                            
+                            # Clean up the text
+                            cell_text = re.sub(r'\s+', ' ', cell_text)
+                            cell_text = cell_text.replace('\n', ' ').replace('\t', ' ')
+                            
+                            # Assign to appropriate column
+                            if j < len(headers):
+                                column_name = headers[j]
+                            else:
+                                column_name = f"Column_{j+1}"
+                            
+                            # Special handling for company column (might contain links)
+                            if 'company' in column_name.lower() and j > 0:  # Skip checkbox column
+                                # Try to find company link
+                                try:
+                                    link = cell.find_element(By.TAG_NAME, "a")
+                                    company_url = link.get_attribute('href')
+                                    row_data[f"{column_name}_URL"] = company_url
+                                except NoSuchElementException:
+                                    pass
+                            
+                            row_data[column_name] = cell_text
+                            
+                        except Exception as e:
+                            logger.warning(f"Error extracting cell {j} from row {i}: {e}")
+                            continue
+                    
+                    # Only add row if it has substantial data
+                    if len([v for v in row_data.values() if v and v.strip()]) >= 3:
                         extracted_data.append(row_data)
-                        logger.info(f"Extracted data for company: {row_data.get('Company_Name', 'Unknown')}")
+                        
+                        # Log company name if available
+                        company_name = row_data.get('Company', row_data.get('Column_2', 'Unknown'))
+                        logger.info(f"Extracted: {company_name}")
                 
                 except Exception as e:
                     logger.error(f"Error extracting row {i}: {e}")
@@ -184,90 +216,6 @@ class Inc42CompanyTableScraper:
         except Exception as e:
             logger.error(f"Error extracting table data: {e}")
             return []
-    
-    def extract_headers(self):
-        """Extract table headers to understand column structure."""
-        try:
-            # Try to find header row
-            header_selectors = [
-                "thead tr th",
-                ".MuiTableHead-root .MuiTableRow-root .MuiTableCell-root",
-                "tr:first-child td",
-                "tr:first-child th"
-            ]
-            
-            headers = []
-            for selector in header_selectors:
-                try:
-                    header_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if header_elements:
-                        headers = [elem.get_attribute('textContent').strip() for elem in header_elements]
-                        if headers and any(headers):
-                            logger.info(f"Found headers: {headers}")
-                            return headers
-                except:
-                    continue
-            
-            # Default headers based on your screenshot
-            default_headers = [
-                'Company_Name', 'Sector', 'Founded_Date', 'Amount_Raised', 
-                'Headquarters', 'Founders', 'Country'
-            ]
-            logger.info(f"Using default headers: {default_headers}")
-            return default_headers
-            
-        except Exception as e:
-            logger.error(f"Error extracting headers: {e}")
-            return ['Company_Name', 'Sector', 'Founded_Date', 'Amount_Raised', 'Headquarters', 'Founders', 'Country']
-    
-    def is_header_row(self, row):
-        """Check if a row is a header row."""
-        try:
-            text = row.get_attribute('textContent').lower()
-            header_indicators = ['company', 'sector', 'founded', 'amount', 'headquarters', 'founders']
-            return any(indicator in text for indicator in header_indicators)
-        except:
-            return False
-    
-    def extract_row_data(self, row, headers):
-        """Extract data from a single table row."""
-        try:
-            # Find all cells in the row
-            cells = row.find_elements(By.CSS_SELECTOR, "td, .MuiTableCell-root, div[class*='cell']")
-            
-            if not cells:
-                return None
-            
-            row_data = {}
-            
-            # Map cell data to headers
-            for i, cell in enumerate(cells):
-                if i < len(headers):
-                    cell_text = cell.get_attribute('textContent').strip()
-                    
-                    # Clean up the cell text
-                    cell_text = re.sub(r'\s+', ' ', cell_text)  # Replace multiple spaces with single space
-                    cell_text = cell_text.replace('\n', ' ').replace('\t', ' ')
-                    
-                    # Check if cell contains a link (for company names)
-                    link_element = cell.find_element(By.TAG_NAME, "a") if cell.find_elements(By.TAG_NAME, "a") else None
-                    if link_element and headers[i] in ['Company_Name', 'company', 'Company']:
-                        cell_text = link_element.get_attribute('textContent').strip()
-                        # Also get the link URL
-                        row_data[f"{headers[i]}_URL"] = link_element.get_attribute('href')
-                    
-                    row_data[headers[i]] = cell_text
-                else:
-                    # Handle extra columns
-                    extra_key = f"Column_{i+1}"
-                    cell_text = cell.get_attribute('textContent').strip()
-                    row_data[extra_key] = cell_text
-            
-            return row_data
-            
-        except Exception as e:
-            logger.error(f"Error extracting row data: {e}")
-            return None
     
     def scrape_company_table(self, url="https://inc42.com/company/"):
         """Main method to scrape the company table."""
@@ -305,7 +253,12 @@ class Inc42CompanyTableScraper:
             df = pd.DataFrame(self.companies_data)
             
             # Clean up column names
-            df.columns = [col.replace(' ', '_').replace('-', '_') for col in df.columns]
+            df.columns = [col.replace(' ', '_').replace('-', '_').replace('(', '').replace(')', '') for col in df.columns]
+            
+            # Remove empty columns and checkbox column
+            df = df.loc[:, (df != '').any(axis=0)]  # Remove empty columns
+            if 'Checkbox' in df.columns:
+                df = df.drop('Checkbox', axis=1)
             
             # Create Excel writer with formatting
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
@@ -329,14 +282,14 @@ class Inc42CompanyTableScraper:
             logger.info(f"Total companies saved: {len(df)}")
             
             # Print sample data
-            print("\n" + "="*50)
+            print("\n" + "="*80)
             print("EXTRACTION SUMMARY")
-            print("="*50)
+            print("="*80)
             print(f"Total companies extracted: {len(df)}")
             print(f"Columns: {list(df.columns)}")
-            print("\nFirst 5 companies:")
-            print(df.head().to_string())
-            print("="*50)
+            print("\nFirst 10 companies:")
+            print(df.head(10).to_string(max_cols=6))
+            print("="*80)
             
             return True
             
@@ -354,7 +307,7 @@ def main():
     """Main execution function."""
     scraper = None
     try:
-        # Initialize scraper (set headless=False to see browser window)
+        # Initialize scraper (set headless=False to see browser window for debugging)
         scraper = Inc42CompanyTableScraper(headless=True)
         
         # Scrape the company table
@@ -368,6 +321,13 @@ def main():
             if success:
                 print(f"\n✅ SUCCESS: Extracted {len(companies)} companies and saved to Excel!")
                 print("📁 File saved as: inc42_companies_extracted.xlsx")
+                
+                # Show sample of extracted data
+                sample_company = companies[0] if companies else {}
+                print(f"\nSample company data:")
+                for key, value in sample_company.items():
+                    print(f"  {key}: {value}")
+                    
             else:
                 print("❌ ERROR: Failed to save data to Excel")
         else:
@@ -393,4 +353,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
