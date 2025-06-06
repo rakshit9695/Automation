@@ -1862,7 +1862,7 @@ def main():
     print("Professional-grade analysis for institutional investors")
     
     # Get Gemini API key
-    gemini_api_key = "AIzaSyC4m9TI1nqpSLL3myiwiE2TKeIti1pjWQ8"
+    gemini_api_key = "Replace with your API Key"
     
     if not gemini_api_key:
         print("❌ Gemini API key is required for AI insights")
